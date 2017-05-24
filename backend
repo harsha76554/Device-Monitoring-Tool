@@ -1,0 +1,130 @@
+#!/usr/bin/perl
+
+use Net::SNMP;
+use DBI;
+use DBD::mysql;
+use Cwd 'abs_path';
+
+$cwd = abs_path(__FILE__);
+@find = split('/',$cwd);
+splice @find,-2;
+push (@find,'db.conf');
+$rpl=join('/',@find);
+require $rpl;
+
+$query = "select * from DEVICES";
+
+
+
+my $OID_sysUpTime = '1.3.6.1.2.1.1.3.0';
+
+
+
+
+#connecting to database 
+$dbh = DBI->connect("DBI:mysql:$database:$host",$username,$password);
+$sqlQuery =$dbh->prepare($query) or die "Can't prepare $query: $dbh->errstr\n";
+
+
+
+#create if table not exist
+
+my $table= "CREATE TABLE IF NOT EXISTS harsha_asgn4(
+id int(30) not null primary key auto_increment,
+IP varchar(30) NOT NULL,
+COMMUNITY varchar(255) NOT NULL,
+PORT INT(10) NOT NULL,
+sysUpTime varchar(255) NOT NULL,
+lastupdate varchar(255) NOT NULL,
+sentreq INT(10) NOT NULL,
+lostreq INT(10) NOT NULL,UNIQUE key(IP,COMMUNITY,PORT)) " ;
+
+$sqltable=$dbh->prepare($table) or die "Can't create $table:$dbh->errstr\n";
+ $sqltable->execute() or die "can't execute create table: $sqltable->errstr";
+
+$time = gmtime();
+
+     $sqlQuery->execute() or die "can't execute the query: $sqlQuery->errstr";
+ 
+while (my @row = $sqlQuery->fetchrow_array())
+  {
+    ($id,$IP,$PORT,$COMMUNITY) = @row;
+     #print " $IP $COMMUNITY $PORT\n";
+
+my $update=$dbh->prepare("insert ignore into harsha_asgn4 (IP,PORT,COMMUNITY) values ('$IP','$PORT','$COMMUNITY')");
+   $update->execute();
+  
+
+
+#creating snmp session
+
+ my ($session,$error) = Net::SNMP->session(
+     -hostname => $IP,
+     -community => $COMMUNITY,
+     -port => $PORT,
+     -nonblocking => 1,
+     -timeout => 1,
+     -version => 1
+);
+
+if (!defined $session){
+   printf "ERROR:Failed to create session for host %s\n",
+           $error;
+     next;
+}
+
+#updating sent.request and last.update time
+
+my $update1 = $dbh-> prepare("update harsha_asgn4 set sentreq=sentreq+1, lastupdate='$time' where IP='$IP' AND COMMUNITY='$COMMUNITY' AND PORT='$PORT' ");
+$update1->execute();
+
+
+
+
+#sending get request to snmp host
+my $result = $session-> get_request(
+        -varbindlist => [$OID_sysUpTime],
+        -callback => [\&get_callback,$IP,$COMMUNITY,$PORT],
+);
+
+
+if (!defined $result) {
+   printf "ERROR: Failed to send get request for host",
+      $session->hostname(),$session->error();
+}
+
+}
+#initiating the snmp message exchange
+
+snmp_dispatcher();
+
+
+sub get_callback
+{
+ my ($session, $IP, $COMMUNITY, $PORT)=@_;
+ my $result = $session->var_bind_list();
+
+ 
+ if (!defined $result){
+   
+        #updating lost request
+   my $update2 = $dbh-> prepare("update harsha_asgn4 set lostreq=lostreq+1 where IP='$IP' AND COMMUNITY='$COMMUNITY' AND PORT='$PORT' ");
+      $update2->execute();
+      
+
+      printf "ERROR: Get request failed for host '%s' \n",
+      $session->hostname(),$session->error();
+    return;
+     }
+
+
+  printf "THE sysUpTime for host '%s' is %s. \n",
+    $session->hostname(),$result->{$OID_sysUpTime};
+  
+  
+
+$update3 = $dbh-> prepare("update harsha_asgn4 set sysUpTime='$result->{$OID_sysUpTime}' where IP='$IP' AND COMMUNITY='$COMMUNITY' AND PORT='$PORT' ");
+$update3->execute();
+
+
+}
